@@ -1,1 +1,265 @@
+<!DOCTYPE html>
+<html lang="tl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple AI Chat</title>
+    <!-- I-load ang Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- I-load ang Inter font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Ilapat ang Inter font bilang default */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Itago ang scrollbar pero payagan ang pag-scroll */
+        #chat-box::-webkit-scrollbar {
+            display: none;
+        }
+        #chat-box {
+            -ms-overflow-style: none;  /* IE and Edge */
+            scrollbar-width: none;  /* Firefox */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
 
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 flex flex-col" style="height: 80vh;">
+        
+        <!-- Header -->
+        <header class="bg-blue-600 text-white p-4 rounded-t-lg flex items-center justify-between">
+            <h1 class="text-xl font-bold">Aking AI Chatbot</h1>
+        </header>
+
+        <!-- Chat Box -->
+        <div id="chat-box" class="flex-1 p-4 overflow-y-auto space-y-4">
+            <!-- Mensahe mula sa AI -->
+            <div class="flex justify-start">
+                <div class="bg-gray-200 text-gray-800 p-3 rounded-lg max-w-xs md:max-w-md">
+                    <p>Kumusta! Paano ako makakatulong sa iyo ngayon? 👋</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="p-4 text-center text-gray-500 hidden">
+            <svg class="animate-spin h-5 w-5 text-blue-600 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span class="ml-2">Nag-iisip...</span>
+        </div>
+
+        <!-- Input Area -->
+        <footer class="bg-gray-50 p-4 rounded-b-lg border-t border-gray-200">
+            <div class="flex space-x-2">
+                <input 
+                    type="text" 
+                    id="user-input" 
+                    placeholder="Mag-type ng mensahe..." 
+                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                <button 
+                    id="send-button"
+                    class="bg-blue-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200"
+                >
+                    Ipadala
+                </button>
+            </div>
+        </footer>
+    </div>
+
+    <script type="module">
+        // Pagtukoy sa API Key (HAYAAN ITONG BLANGKO, awtomatikong pinupunan)
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+        // System instruction para sa AI
+        const systemInstruction = {
+            parts: [{ text: "You are a helpful, friendly, and expressive AI assistant. Respond in Tagalog. Do not use markdown formatting like * or #." }]
+        };
+
+        // DOM Elements
+        const chatBox = document.getElementById('chat-box');
+        const userInput = document.getElementById('user-input');
+        const sendButton = document.getElementById('send-button');
+        const loadingIndicator = document.getElementById('loading');
+
+        // Itago ang kasaysayan ng chat
+        let chatHistory = [];
+
+        // --- FUNCTIONS ---
+
+        /**
+         * Nagpapakita ng mensahe sa chat box
+         */
+        function displayMessage(role, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const messageBubble = document.createElement('div');
+            messageBubble.className = `p-3 rounded-lg max-w-xs md:max-w-md break-words ${
+                role === 'user' 
+                ? 'bg-blue-600 text-white' 
+                : 'bg-gray-200 text-gray-800'
+            }`;
+            
+            messageBubble.innerText = text;
+            messageDiv.appendChild(messageBubble);
+            chatBox.appendChild(messageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        /**
+         * Function para sa pag-retry na may exponential backoff
+         */
+        async function fetchWithBackoff(fetchFn, maxRetries = 5) {
+            let attempt = 0;
+            while (attempt < maxRetries) {
+                try {
+                    const response = await fetchFn();
+                    if (response.ok) {
+                        return response;
+                    } else if (response.status === 429 || response.status >= 500) {
+                        console.warn(`Retryable error: ${response.status}. Retrying in ${2 ** attempt}s...`);
+                    } else {
+                        console.error(`Non-retryable error: ${response.status}`);
+                        return response;
+                    }
+                } catch (error) {
+                    console.warn(`Fetch error: ${error.message}. Retrying in ${2 ** attempt}s...`);
+                }
+                
+                const delay = (2 ** attempt) * 1000 + Math.random() * 1000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+                attempt++;
+            }
+            throw new Error("Max retries reached for API call.");
+        }
+
+        /**
+         * (BAGONG FUNCTION) Nililinis ang text mula sa markdown characters
+         * @param {string} text - Ang raw text mula sa AI
+         * @returns {string} - Ang nilinis na text
+         */
+        function cleanText(text) {
+            // Alisin ang * (para sa bold/italics) at # (para sa headings)
+            // Gumagamit ng regex para alisin sila habang pinapanatili ang text sa loob
+            // Halimbawa: *bold* -> bold
+            return text.replace(/[*#]/g, '').trim();
+        }
+
+        /**
+         * Tumutukoy ng emoji batay sa text
+         */
+        function determineEmoji(text) {
+            const lowerText = text.toLowerCase();
+            if (lowerText.includes('kumusta') || lowerText.includes('kamusta') || lowerText.includes('hello') || lowerText.includes('hi po')) return '👋';
+            if (lowerText.includes('masaya') || lowerText.includes('mabuti') || lowerText.includes('mahusay') || lowerText.includes('galing') || lowerText.includes('walang anuman')) return '😊';
+            if (lowerText.includes('salamat')) return '🙏';
+            if (lowerText.includes('tagumpay') || lowerText.includes('nagawa') || lowerText.includes('congrats')) return '🎉';
+            if (lowerText.includes('paumanhin') || lowerText.includes('pasensya') || lowerText.includes('error') || lowerText.includes('hindi pwede') || lowerText.includes('malungkot')) return '😔';
+            if (lowerText.endsWith('?')) return '🤔';
+            if (lowerText.includes('ideya') || lowerText.includes('tip')) return '💡';
+            if (lowerText.includes('code') || lowerText.includes('program') || lowerText.includes('javascript')) return '💻';
+            if (lowerText.includes('pagkain') || lowerText.includes('luto') || lowerText.includes('recipe')) return '🍲';
+            if (lowerText.includes('musika') || lowerText.includes('kanta')) return '🎵';
+            if (lowerText.includes('laro') || lowerText.includes('game')) return '🎮';
+            return '🙂';
+        }
+
+        /**
+         * Tumawag sa Gemini API (IN-UPDATE)
+         */
+        async function getGeminiResponse() {
+            loadingIndicator.classList.remove('hidden');
+
+            const apiHistory = chatHistory.map(entry => ({
+                role: entry.role,
+                parts: [{ text: entry.text }]
+            }));
+            
+            const latestUserMessage = apiHistory.pop(); 
+
+            const payload = {
+                contents: [
+                    ...apiHistory, 
+                    latestUserMessage
+                ],
+                systemInstruction: systemInstruction,
+            };
+
+            try {
+                const fetchFn = () => fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const response = await fetchWithBackoff(fetchFn);
+
+                if (!response.ok) {
+                    const errorBody = await response.text();
+                    throw new Error(`API Error ${response.status}: ${errorBody}`);
+                }
+
+                const result = await response.json();
+                
+                const candidate = result.candidates?.[0];
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    let modelText = candidate.content.parts[0].text;
+                    
+                    // --- BAGONG DAGDAG ---
+                    // Linisin ang text mula sa Markdown characters
+                    modelText = cleanText(modelText);
+                    // --- KATAPUSAN NG DAGDAG ---
+
+                    // Kumuha ng emoji at idagdag sa text
+                    const emoji = determineEmoji(modelText);
+                    const modelTextWithEmoji = `${modelText} ${emoji}`;
+
+                    // Idagdag sa chat history at ipakita ang nalinis na bersyon
+                    chatHistory.push({ role: 'model', text: modelTextWithEmoji });
+                    displayMessage('model', modelTextWithEmoji);
+
+                } else {
+                    throw new Error("Invalid response structure from API.");
+                }
+
+            } catch (error) {
+                console.error("Error calling Gemini API:", error);
+                displayMessage('model', `Paumanhin, nagkaroon ng error: ${error.message} 😔`);
+            } finally {
+                loadingIndicator.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Pangasiwaan ang pagpapadala ng mensahe
+         */
+        function handleSendMessage() {
+            const text = userInput.value.trim();
+            if (text === "") return;
+
+            chatHistory.push({ role: 'user', text: text });
+            displayMessage('user', text);
+
+            userInput.value = "";
+            getGeminiResponse();
+        }
+
+        // --- EVENT LISTENERS ---
+        sendButton.addEventListener('click', handleSendMessage);
+        userInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                handleSendMessage();
+            }
+        });
+
+    </script>
+</body>
+  </html>
